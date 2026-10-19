@@ -53,9 +53,10 @@ jobs:
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
+      # The plugin lockfile is written by a newer bun than the fork pins, so it is not frozen here.
       - name: Install plugin dependencies
         working-directory: opencode-claude-tools
-        run: bun install --frozen-lockfile
+        run: bun install
 
       # `build` runs the `prebuild` hook, which bundles the plugin and the embedded server.
       - name: Build app
