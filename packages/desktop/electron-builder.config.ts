@@ -21,6 +21,8 @@ const metainfoFpm = (appId: string) =>
 async function signWindows(configuration: { path: string }) {
   if (process.platform !== "win32") return
   if (process.env.GITHUB_ACTIONS !== "true") return
+  // The fork ships unsigned builds.
+  if (process.env.OPENCODE_UNSIGNED === "1") return
 
   await execFileAsync(
     "pwsh",
@@ -55,8 +57,10 @@ const getBase = (appId: string): Configuration => ({
   extraMetadata: {
     desktopName: `${appId}.desktop`,
   },
-  files: ["out/**/*", "resources/**/*", "!resources/opencode-cli*"],
+  files: ["out/**/*", "resources/**/*", "!resources/opencode-cli*", "!resources/plugins/**"],
   extraResources: [
+    // Plugins are imported by the server at runtime, so they must live outside the asar.
+    { from: "resources/plugins/", to: "plugins/" },
     ...(channel === "dev"
       ? [
           {
