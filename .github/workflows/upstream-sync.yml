@@ -1,0 +1,111 @@
+name: upstream-sync
+
+# Weekly: merge the newest upstream stable release tag into a sync branch and open a PR to `stable`.
+# `stable` is never rebased or force-pushed. See packages/desktop/FORK.md.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout stable
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: stable
+          fetch-depth: 0
+
+      - name: Find newest upstream release
+        id: upstream
+        run: |
+          set -euo pipefail
+          release=$(gh release view --repo anomalyco/opencode --json tagName,isPrerelease)
+          [ "$(jq -r .isPrerelease <<<"$release")" = "false" ] || { echo "Latest upstream release is a prerelease; nothing to do."; exit 0; }
+          tag=$(jq -r .tagName <<<"$release")
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch --no-tags upstream "refs/tags/$tag:refs/tags/$tag"
+          if git merge-base --is-ancestor "$tag" origin/stable; then
+            echo "$tag is already merged into stable; nothing to do."
+            exit 0
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Open V2 port issue
+        if: steps.upstream.outputs.tag != '' && !startsWith(steps.upstream.outputs.tag, 'v1.') && !startsWith(steps.upstream.outputs.tag, 'v0.')
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          title="Upstream V2 released: plugin needs porting to the V2 plugin API"
+          titles=$(gh issue list --state all --limit 200 --json title --jq '.[].title')
+          if grep -Fxq "$title" <<<"$titles"; then
+            echo "Issue already exists; keeping it."
+            exit 0
+          fi
+          gh issue create --title "$title" --body "Upstream released $TAG, a new major version. It is not merged into \`stable\`: the opencode-claude-tools plugin targets the V1 plugin API and has to be ported to the V2 plugin API first."
+
+      - name: Merge upstream tag
+        if: steps.upstream.outputs.tag != '' && (startsWith(steps.upstream.outputs.tag, 'v1.') || startsWith(steps.upstream.outputs.tag, 'v0.'))
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          branch="sync/upstream-$TAG"
+          conflict_title="Upstream $TAG could not be merged into stable"
+
+          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+            echo "A PR for $branch already exists; nothing to do."
+            exit 0
+          fi
+          titles=$(gh issue list --state all --limit 200 --json title --jq '.[].title')
+          if grep -Fxq "$conflict_title" <<<"$titles"; then
+            echo "A conflict issue for $TAG already exists; nothing to do."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch" origin/stable
+
+          if ! git merge --no-ff -m "chore: merge upstream $TAG" "$TAG"; then
+            files=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            gh issue create --title "$conflict_title" --body "Merging upstream \`$TAG\` into \`stable\` failed.
+
+          Conflicting files:
+
+          $(sed 's/^/- `/; s/$/`/' <<<"${files:-(none listed, see the workflow run log)}")
+
+          Merge manually: \`git fetch upstream tag $TAG && git checkout -b $branch origin/stable && git merge $TAG\`."
+            exit 0
+          fi
+
+          # GITHUB_TOKEN cannot push commits that change .github/workflows; report that instead of failing silently.
+          if ! git push origin "$branch"; then
+            gh issue create --title "$conflict_title" --body "\`$TAG\` merges cleanly but \`$branch\` could not be pushed with \`GITHUB_TOKEN\` (usually because the merge changes \`.github/workflows\`).
+
+          Push it manually: \`git fetch upstream tag $TAG && git checkout -b $branch origin/stable && git merge $TAG && git push origin $branch\`, then open a PR to \`stable\`."
+            exit 0
+          fi
+
+          gh pr create --base stable --head "$branch" \
+            --title "chore: merge upstream $TAG" \
+            --body "Merges upstream release \`$TAG\` into \`stable\`. Merge (do not squash or rebase) to keep the upstream history."

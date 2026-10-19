@@ -89,3 +89,11 @@ for (const channel of ["beta", "prod"] as const) {
     })
   })
 }
+
+test("ships the bundled plugin outside the asar", async () => {
+  const module = await import("./electron-builder.config.ts?plugin-resource")
+  const config = module.default as Configuration
+
+  expect(config.files).toContain("!resources/plugins/**")
+  expect(config.extraResources).toContainEqual({ from: "resources/plugins/", to: "plugins/" })
+})

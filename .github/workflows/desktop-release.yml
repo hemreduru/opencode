@@ -1,0 +1,103 @@
+name: desktop-release
+
+# Unsigned Windows (NSIS) and Linux (AppImage + deb) desktop builds of the fork,
+# with the opencode-claude-tools plugin bundled. See packages/desktop/FORK.md.
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish to (leave empty to only build and keep the installers as workflow artifacts)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            package: bun run package:win
+          - os: ubuntu-latest
+            package: bun x electron-builder --linux AppImage deb --config electron-builder.config.ts
+    runs-on: ${{ matrix.os }}
+    env:
+      # Fork builds are never signed or notarized; the upstream signing secrets do not exist here.
+      OPENCODE_UNSIGNED: "1"
+      # The in-process v1 server is used, so the v2 CLI binary is not downloaded.
+      OPENCODE_SKIP_CLI: "1"
+      OPENCODE_CLAUDE_TOOLS_DIR: ${{ github.workspace }}/opencode-claude-tools
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Checkout plugin
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: hemreduru/opencode-claude-tools
+          ssh-key: ${{ secrets.PLUGIN_REPO_SSH_KEY }}
+          path: opencode-claude-tools
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Install plugin dependencies
+        working-directory: opencode-claude-tools
+        run: bun install --frozen-lockfile
+
+      # `build` runs the `prebuild` hook, which bundles the plugin and the embedded server.
+      - name: Build app
+        working-directory: packages/desktop
+        run: bun run build
+
+      - name: Package installers
+        working-directory: packages/desktop
+        run: ${{ matrix.package }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            packages/desktop/dist/*.exe
+            packages/desktop/dist/*.AppImage
+            packages/desktop/dist/*.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: installers-*
+          path: installers
+          merge-multiple: true
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          ls -l installers
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" installers/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" installers/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "$TAG" --notes "Unsigned desktop build with opencode-claude-tools bundled."
+          fi

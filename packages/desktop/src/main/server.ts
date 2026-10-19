@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { app, utilityProcess } from "electron"
 import type { Details } from "electron"
+import { forkEnv } from "./fork-env"
 import { getLogger } from "./logging"
 import { getUserShell, loadShellEnv } from "./shell-env"
 import { getStore } from "./store"
@@ -46,12 +48,23 @@ export function preferAppEnv(userDataPath: string) {
   const shellEnv = shell ? loadShellEnv(shell, getLogger()) : null
   Object.assign(process.env, {
     ...shellEnv,
+    ...forkEnv({ ...process.env, ...shellEnv }, bundledPlugin()),
     OPENCODE_EXPERIMENTAL_ICON_DISCOVERY: "true",
     OPENCODE_EXPERIMENTAL_FILEWATCHER: "true",
     OPENCODE_CLIENT: "desktop",
     XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
   })
   return shellEnv
+}
+
+// Built by scripts/bundle-plugin.ts and shipped outside the asar so the server can import it.
+function bundledPlugin() {
+  const file = join(
+    app.isPackaged ? process.resourcesPath : join(app.getAppPath(), "resources"),
+    "plugins",
+    "opencode-claude-tools.js",
+  )
+  return existsSync(file) ? pathToFileURL(file).href : undefined
 }
 
 export async function spawnLocalServer(
